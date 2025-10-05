@@ -1,0 +1,6 @@
+[workspace]
+members = ["core", "uuencode", "uudecode", "shar", "unshar"]
+resolver = "2"
+
+# (optional) centralize common deps so each member can use them with { workspace = true }
+[workspace.dependencies]
