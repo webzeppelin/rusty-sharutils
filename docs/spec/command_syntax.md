@@ -1,101 +1,264 @@
-# Command Syntax for Sharutils Commands
+# Command Line Parsing Framework Specification
 
-Commands in GNU Sharutils follow the same standard used by many other Gnu and Linux commands. There is the command path itself, followed by options, followed finally by a list of arguments, which in the case of Sharutils are typically filenames to operate on. Options are specified by doubled hyphens and their name or by a single hyphen and the flag character.
+This specification defines a shared command line parsing framework for all four rusty-sharutils commands (`shar`, `unshar`, `uuencode`, `uudecode`). The framework provides type-safe parsing with validation while using only the Rust standard library.
 
-Options can have values associated with them, and the values are specified differently when you are using a flag and when you are using the option name. When using the flag to specify an option with a value, the option is separated from the flag by whitespace. When using the name to specify the option, the value is separated from the name by an "=" character. For example, if we have an option with a flag of "f" and a name of "file" that requires a value, we coould specify it either as "-f FILENAME" or as "--file=FILENAME".
+## Overview
 
-For example, the syntax for the uuencode command from its manpage is:
+Commands follow GNU/Linux conventions:
+- Command path, followed by options, followed by arguments
+- Long options: `--option` or `--option=value`
+- Short flags: `-f` or `-f value`
+- Flag combining: `-abc` (equivalent to `-a -b -c`)
+- Only the last flag in a combination can take a value: `-abc value`
 
+## Data Structures
+
+### OptionDefinition
+
+Defines a single command-line option with validation.
+
+```rust
+pub struct OptionDefinition {
+    pub flag: char,
+    pub name: String,
+    pub has_value: bool,
+    pub default_value: Option<OsString>,
+    pub validator: Option<OptionValidator>,
+    pub help_text: String,
+}
 ```
-Usage:  uuencode [ -<flag> | --<name> ]... [<in-file>] <output-name>
 
-   -m, --base64               convert using base64
-   -e, --encode-file-name     encode the output file name
-   -v, --version[=MODE]       output version information and exit
-   -h, --help                 display extended usage information and exit
-   -!, --more-help            extended usage information passed thru pager
-   -R, --save-opts[=FILE]     save the option state to a config file FILE
-   -r, --load-opts=FILE       load options from the config file FILE
-                                - disabled with '--no-load-opts'
-                                - may appear multiple times
+**Field Requirements:**
+- `flag`: Single ASCII letter (a-z, A-Z)
+- `name`: Lowercase letters and hyphens only, no whitespace
+- `has_value`: If true, option accepts/requires a value
+- `default_value`: Used when option specified without value (only valid if `has_value` is true)
+- `validator`: Optional function to validate option values
+- `help_text`: Description for help output
+
+### ParsedCommand
+
+Contains the fully parsed and validated command line.
+
+```rust
+pub struct ParsedCommand {
+    pub executable_path: OsString,
+    pub options: HashMap<String, Option<OsString>>,
+    pub arguments: Vec<OsString>,
+}
+
+impl ParsedCommand {
+    /// Returns true if the named option was specified on the command line
+    pub fn is_option_set(&self, name: &str) -> bool;
+    
+    /// Returns the value associated with an option, or None if not set
+    pub fn option_value(&self, name: &str) -> Option<&OsStr>;
+    
+    /// Returns the value for an option or its default value
+    pub fn option_value_or_default(&self, name: &str, default: &OsStr) -> &OsStr;
+    
+    /// Returns true if the option has an explicit value (not just present)
+    pub fn has_option_value(&self, name: &str) -> bool;
+}
 ```
 
-For this Rust port of the GNU Sharutils, our goal is not to duplicate the full functionality of getopts and the other libraries used in the C source, but to provide a pragmatic implementation that supports the primary, documented command line capabilities.
+### Error Types
 
-We do want to support one documented convenience, though, and this is the ability to combine flags. This convenient notation allows a series of flags to be defined with a single dash proceeding it. For example, a command with the options "-t -e -a" could be specified on the command line as "-tea". In this notation, only the last flag in the list of flags can have an option value (e.g., "-tea <a_option_value>")
-
-When the "main" function of our command line program is invoked, it will use `std::env::args_os()` to discover the command path and other command line arguments, and then parse them into a well-defined structure that our command code can use to discover what options should be used in processing.
-
-## Option Validation
-Options may also be assigned a validator that validates the string value provided on the command line for that option.  It uses a type of...
-
-```
-pub type OptionValidator = fn(&OsStr) -> Result<(), ValidationError>;
-```
-*(Note: This type has already been added to the core code)*
-
-With the `ValidationError` newtype defined as...
-
-```
+```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidationError(pub Cow<'static, str>);
-
-impl ValidationError {
-    pub fn new<S: Into<Cow<'static, str>>>(msg: S) -> Self {
-        ValidationError(msg.into())
-    }
+pub enum ParseError {
+    ValidationError(ValidationError),
+    UnknownOption(String),
+    MissingValue(String),
+    InvalidFlagCombination(String),
+    DuplicateOption(String),
 }
 
-impl fmt::Display for ValidationError {
+impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            ParseError::ValidationError(e) => write!(f, "Validation error: {}", e),
+            ParseError::UnknownOption(opt) => write!(f, "Unknown option: {}", opt),
+            ParseError::MissingValue(opt) => write!(f, "Option '{}' requires a value", opt),
+            ParseError::InvalidFlagCombination(flags) => write!(f, "Invalid flag combination: {}", flags),
+            ParseError::DuplicateOption(opt) => write!(f, "Option '{}' specified multiple times", opt),
+        }
     }
 }
 
-impl std::error::Error for ValidationError {}
+impl std::error::Error for ParseError {}
 ```
-*(Note: This struct has already been added to the core code)*
 
-## Option and Command Data Model
-We will need a couple structures to support parsing of the command line.
+## Core Parsing Function
 
-The first is a structure that holds the definition for a command option. 
-
-### struct: OptionDefinition
-
-| Field name     | Type                      | Description                                                                                                      |
-|----------------|---------------------------|------------------------------------------------------------------------------------------------------------------|
-| `flag`         | `char`                    | The flag character to use to represent the option.                                                               |
-| `name`         | `String`                  | The name of the option (lowercase letters only, no whitespace allowed).                                          |
-| `hasValue`     | `bool`                    | True if the option can have a value associated with it.                                                          |
-| `defaultValue` | `Option<OsString>`        | The value to use if no value is specified. If None, then the value is required.                                  |
-| `validator`    | `Option<OptionValidator>` | An optional validator that will be used to validate a value. If not provided, then all input is considered valid.|
-
-The next is a structure that holds the information from a fully parsed command line.
-
-### struct: Command
-
-| Field name     | Type                          | Description                                                                 |
-|----------------|-------------------------------|-----------------------------------------------------------------------------|
-| `path`         | `OsStr`                       | The path to the command executable.                                         |
-| `options`      | `Map<String,Option<OsStr>>`   | A map of option names to option values provided.                            |
-| `args`         | `Vec<OsStr>`                  | The arguments from the command line that follow the options (0 or more).    |
-
-
-Each individual command in this library will use shared components from the core library to parse the command line into a `Command` object. This entails:
-
-- Constructing a `Vec<OptionDefinition>` containing definitions of each option supported by the command (including validators where appripriate).
-- Passing this Vec to a parsing function that has the following signature: `fn ParseCommandLine(options: Vec<OptionDefinition>) -> Result<Command, ValidationError>`
-
-With the command line parsed and validated, the command can now interogate the command using the struct fields and the following methods associated with the `Command` struct.
-
+```rust
+/// Parses command line arguments according to the provided option definitions
+pub fn parse_command_line(
+    option_definitions: &[OptionDefinition],
+    args: impl Iterator<Item = OsString>
+) -> Result<ParsedCommand, ParseError>;
 ```
-// returns true if option was specified, false otherwise
-optionSet(name: &str) -> bool
 
-// tests whether there is a value associated with an option
-hasOptionValue(name: &str) -> bool
+## Parsing Algorithm Specification
 
-// returns the value associated with an option
-optionValue(name: &str) -> Option<OsStr>
+### 1. Initialization
+- Extract executable path from first argument
+- Build lookup tables for options by flag and name
+- Validate option definitions for conflicts
+
+### 2. Argument Processing
+Process remaining arguments in order:
+
+**Long Options (`--name` or `--name=value`)**
+- Strip `--` prefix
+- Split on `=` if present
+- Look up option by name
+- Validate value if provided/required
+- Store in options map
+
+**Short Flags (`-f` or `-abc`)**
+- Strip `-` prefix  
+- For single flag: process normally
+- For multiple flags: process each except last as boolean options
+- Last flag can accept value from next argument
+- Validate no value-requiring flags in middle of combination
+
+**Arguments**
+- All non-option arguments after options are complete
+- Options processing stops at `--` or first non-option argument
+
+### 3. Post-Processing
+- Apply default values for unspecified options
+- Validate all required values are present
+- Run validators on all provided values
+
+### 4. Standard Options
+All commands must support these built-in options:
+
+```rust
+pub fn standard_options() -> Vec<OptionDefinition> {
+    vec![
+        OptionDefinition {
+            flag: 'h',
+            name: "help".to_string(),
+            has_value: false,
+            default_value: None,
+            validator: None,
+            help_text: "Display this help message and exit".to_string(),
+        },
+        OptionDefinition {
+            flag: 'V',
+            name: "version".to_string(),
+            has_value: false,
+            default_value: None,
+            validator: None,
+            help_text: "Display version information and exit".to_string(),
+        },
+    ]
+}
 ```
+
+## Validation Framework
+
+### Custom Validators
+Commands can provide custom validators for specific options:
+
+```rust
+// Example: validate file exists
+fn validate_existing_file(value: &OsStr) -> Result<(), ValidationError> {
+    let path = Path::new(value);
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(ValidationError::new(format!("File does not exist: {}", path.display())))
+    }
+}
+
+// Example: validate positive integer
+fn validate_positive_integer(value: &OsStr) -> Result<(), ValidationError> {
+    let s = value.to_str()
+        .ok_or_else(|| ValidationError::new("Invalid UTF-8 in number"))?;
+    let n: u32 = s.parse()
+        .map_err(|_| ValidationError::new("Not a valid positive integer"))?;
+    if n == 0 {
+        return Err(ValidationError::new("Value must be greater than zero"));
+    }
+    Ok(())
+}
+```
+
+## Help Generation
+
+The framework must automatically generate help text:
+
+```rust
+/// Generates formatted help text for the command
+pub fn generate_help(
+    command_name: &str,
+    description: &str,
+    usage_pattern: &str,
+    option_definitions: &[OptionDefinition]
+) -> String;
+```
+
+Example output:
+```
+Usage: uuencode [OPTIONS] [input-file] output-name
+
+Convert files to uuencoded format for safe transmission
+
+Options:
+  -m, --base64           Use base64 encoding instead of uuencoding
+  -e, --encode-filename  Encode the output filename
+  -h, --help            Display this help message and exit
+  -V, --version         Display version information and exit
+```
+
+## Integration Pattern
+
+Each command integrates the framework as follows:
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut options = standard_options();
+    options.extend(command_specific_options());
+    
+    let parsed = parse_command_line(&options, std::env::args_os().skip(1))?;
+    
+    if parsed.is_option_set("help") {
+        println!("{}", generate_help("command", "description", "usage", &options));
+        return Ok(());
+    }
+    
+    if parsed.is_option_set("version") {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    
+    // Command-specific logic using parsed.options and parsed.arguments
+    Ok(())
+}
+```
+
+## Error Handling Requirements
+
+- All parsing errors must be recoverable and user-friendly
+- Invalid options should suggest similar valid options when possible
+- Validation errors should clearly indicate what input was invalid and why
+- Help should be automatically displayed for parsing errors
+
+## Testing Requirements
+
+The framework must support:
+- Unit tests for individual parsing scenarios
+- Property-based testing for option combinations
+- Integration tests with real command line argument arrays
+- Error case validation
+- Round-trip testing (parse then reconstruct command line)
+
+## Cross-Platform Considerations
+
+- Use `OsString`/`OsStr` for all user-provided values
+- Handle platform-specific path separators in file validation
+- Support Unicode in option values where the platform allows
+- Consistent behavior across Windows, macOS, and Linux
