@@ -294,8 +294,109 @@ pub fn validate_positive_integer(value: &OsStr) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Validates that a version mode is valid (version, copyright, verbose)
-/// Used by GNU-style version options across all sharutils commands
+/// Handles version option output consistently across all commands
+pub fn handle_version_output(version_mode: Option<&std::ffi::OsStr>, command_name: &str) {
+    let mode = version_mode
+        .map(|v| v.to_string_lossy())
+        .unwrap_or_else(|| "copyright".into());
+    
+    let version_str = mode.to_lowercase();
+    match version_str.as_str() {
+        "version" | "v" => {
+            // Just version number
+            println!("{} {}", command_name, env!("CARGO_PKG_VERSION"));
+        },
+        "copyright" | "c" => {
+            // Copyright info (default)
+            println!("{} {} (rusty-sharutils)", command_name, env!("CARGO_PKG_VERSION"));
+            println!("Copyright (C) 2025 rusty-sharutils contributors");
+            println!("This is free software; see the source for copying conditions.");
+            println!("There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A");
+            println!("PARTICULAR PURPOSE.");
+        },
+        "verbose" => {
+            // Verbose - full licensing terms
+            println!("{} {} (rusty-sharutils)", command_name, env!("CARGO_PKG_VERSION"));
+            println!("Copyright (C) 2025 rusty-sharutils contributors");
+            println!();
+            println!("This program is free software: you can redistribute it and/or modify");
+            println!("it under the terms of the GNU General Public License as published by");
+            println!("the Free Software Foundation, either version 3 of the License, or");
+            println!("(at your option) any later version.");
+            println!();
+            println!("This program is distributed in the hope that it will be useful,");
+            println!("but WITHOUT ANY WARRANTY; without even the implied warranty of");
+            println!("MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the");
+            println!("GNU General Public License for more details.");
+            println!();
+            println!("You should have received a copy of the GNU General Public License");
+            println!("along with this program.  If not, see <https://www.gnu.org/licenses/>.");
+        },
+        _ => {
+            // Default to copyright for unknown modes
+            println!("{} {} (rusty-sharutils)", command_name, env!("CARGO_PKG_VERSION"));
+            println!("Copyright (C) 2025 rusty-sharutils contributors");
+            println!("This is free software; see the source for copying conditions.");
+            println!("There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A");
+            println!("PARTICULAR PURPOSE.");
+        }
+    }
+}
+
+/// Handles more-help option consistently across all commands
+pub fn handle_more_help(command_name: &str, description: &str, usage: &str, options: &[OptionDefinition]) {
+    let help_text = generate_help(command_name, description, usage, options);
+    
+    // Try to use a pager, fall back to direct output
+    match std::process::Command::new("less")
+        .arg("-F")  // exit if content fits on one screen
+        .arg("-R")  // allow ANSI color codes
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.take() {
+                let mut stdin = stdin;
+                let _ = stdin.write_all(help_text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+        Err(_) => {
+            // Fall back to direct output if pager fails
+            println!("{}", help_text);
+        }
+    }
+}
+
+/// Debug print the parsed command structure consistently
+pub fn debug_print_parsed_command(parsed: &ParsedCommand) {
+    eprintln!("DEBUG: Parsed Command Structure:");
+    eprintln!("  Executable: {:?}", parsed.executable_path);
+    eprintln!("  Options:");
+    for (name, value) in &parsed.options {
+        match value {
+            Some(v) => eprintln!("    --{} = {:?}", name, v),
+            None => eprintln!("    --{}", name),
+        }
+    }
+    eprintln!("  Arguments:");
+    for (i, arg) in parsed.arguments.iter().enumerate() {
+        eprintln!("    [{}]: {:?}", i, arg);
+    }
+    eprintln!();
+}
+
+/// Print config file options if specified
+pub fn print_config_file_options(parsed: &ParsedCommand) {
+    if let Some(save_file) = parsed.option_value("save-opts") {
+        println!("Note: Would save current options to: {:?}", save_file);
+    }
+    
+    if let Some(load_file) = parsed.option_value("load-opts") {
+        println!("Note: Would load options from: {:?}", load_file);
+    }
+}
 pub fn validate_version_mode(value: &OsStr) -> Result<(), ValidationError> {
     let s = value.to_str()
         .ok_or_else(|| ValidationError::new("Invalid UTF-8 in version mode".to_string()))?;
