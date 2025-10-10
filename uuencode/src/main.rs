@@ -2,37 +2,8 @@ use std::ffi::OsString;
 use std::process;
 use sharutils_core::{
     OptionDefinition, ParsedCommand, standard_options, parse_command_line, 
-    generate_help, ValidationError
+    generate_help, validate_version_mode, validate_file_path
 };
-
-/// Validates that a version mode is valid (version, copyright, verbose)
-fn validate_version_mode(value: &std::ffi::OsStr) -> Result<(), ValidationError> {
-    let s = value.to_str()
-        .ok_or_else(|| ValidationError::new("Invalid UTF-8 in version mode".to_string()))?;
-    
-    match s.to_lowercase().as_str() {
-        "version" | "v" | "copyright" | "c" | "verbose" => Ok(()),
-        _ => Err(ValidationError::new(
-            "Version mode must be 'version', 'copyright', or 'verbose'".to_string()
-        ))
-    }
-}
-
-/// Validates that a file path is valid (basic check for reasonable characters)
-fn validate_file_path(value: &std::ffi::OsStr) -> Result<(), ValidationError> {
-    let s = value.to_str()
-        .ok_or_else(|| ValidationError::new("Invalid UTF-8 in file path".to_string()))?;
-    
-    // Basic validation - just check for null bytes and excessive length
-    if s.contains('\0') {
-        return Err(ValidationError::new("File path cannot contain null bytes".to_string()));
-    }
-    if s.len() > 4096 {
-        return Err(ValidationError::new("File path too long".to_string()));
-    }
-    
-    Ok(())
-}
 
 /// Returns uuencode-specific command line options
 fn uuencode_options() -> Vec<OptionDefinition> {

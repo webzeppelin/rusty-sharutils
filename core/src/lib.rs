@@ -294,6 +294,37 @@ pub fn validate_positive_integer(value: &OsStr) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Validates that a version mode is valid (version, copyright, verbose)
+/// Used by GNU-style version options across all sharutils commands
+pub fn validate_version_mode(value: &OsStr) -> Result<(), ValidationError> {
+    let s = value.to_str()
+        .ok_or_else(|| ValidationError::new("Invalid UTF-8 in version mode".to_string()))?;
+    
+    match s.to_lowercase().as_str() {
+        "version" | "v" | "copyright" | "c" | "verbose" => Ok(()),
+        _ => Err(ValidationError::new(
+            "Version mode must be 'version', 'copyright', or 'verbose'".to_string()
+        ))
+    }
+}
+
+/// Validates that a file path is valid (basic check for reasonable characters)
+/// Used for config files and other file path options across all sharutils commands
+pub fn validate_file_path(value: &OsStr) -> Result<(), ValidationError> {
+    let s = value.to_str()
+        .ok_or_else(|| ValidationError::new("Invalid UTF-8 in file path".to_string()))?;
+    
+    // Basic validation - just check for null bytes and excessive length
+    if s.contains('\0') {
+        return Err(ValidationError::new("File path cannot contain null bytes".to_string()));
+    }
+    if s.len() > 4096 {
+        return Err(ValidationError::new("File path too long".to_string()));
+    }
+    
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,5 +566,42 @@ mod tests {
         
         // Test with a file that shouldn't exist
         assert!(validate_existing_file(OsStr::new("/nonexistent/file/path")).is_err());
+    }
+
+    #[test]
+    fn test_validate_version_mode() {
+        // Test valid modes
+        assert!(validate_version_mode(OsStr::new("version")).is_ok());
+        assert!(validate_version_mode(OsStr::new("v")).is_ok());
+        assert!(validate_version_mode(OsStr::new("copyright")).is_ok());
+        assert!(validate_version_mode(OsStr::new("c")).is_ok());
+        assert!(validate_version_mode(OsStr::new("verbose")).is_ok());
+        assert!(validate_version_mode(OsStr::new("VERSION")).is_ok()); // case insensitive
+        
+        // Test invalid modes
+        assert!(validate_version_mode(OsStr::new("invalid")).is_err());
+        assert!(validate_version_mode(OsStr::new("")).is_err());
+        assert!(validate_version_mode(OsStr::new("help")).is_err());
+    }
+
+    #[test]
+    fn test_validate_file_path() {
+        // Test valid paths
+        assert!(validate_file_path(OsStr::new("valid/path.txt")).is_ok());
+        assert!(validate_file_path(OsStr::new("simple.txt")).is_ok());
+        assert!(validate_file_path(OsStr::new("/absolute/path")).is_ok());
+        assert!(validate_file_path(OsStr::new("./relative/path")).is_ok());
+        
+        // Test path with null byte (should fail)
+        let null_path = unsafe { std::str::from_utf8_unchecked(&[b'f', b'i', b'l', b'e', 0, b't', b'x', b't']) };
+        assert!(validate_file_path(OsStr::new(null_path)).is_err());
+        
+        // Test excessively long path
+        let long_path = "a".repeat(5000);
+        assert!(validate_file_path(OsStr::new(&long_path)).is_err());
+        
+        // Test reasonable length path
+        let ok_path = "a".repeat(100);
+        assert!(validate_file_path(OsStr::new(&ok_path)).is_ok());
     }
 }
