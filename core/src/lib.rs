@@ -397,6 +397,221 @@ pub fn print_config_file_options(parsed: &ParsedCommand) {
         println!("Note: Would load options from: {:?}", load_file);
     }
 }
+
+// Uuencoding functionality
+// Standard uuencoding translation table (from GNU sharutils)
+const UU_STD: [u8; 64] = [
+    b'`', b'!', b'"', b'#', b'$', b'%', b'&', b'\'',
+    b'(', b')', b'*', b'+', b',', b'-', b'.', b'/',
+    b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7',
+    b'8', b'9', b':', b';', b'<', b'=', b'>', b'?',
+    b'@', b'A', b'B', b'C', b'D', b'E', b'F', b'G',
+    b'H', b'I', b'J', b'K', b'L', b'M', b'N', b'O',
+    b'P', b'Q', b'R', b'S', b'T', b'U', b'V', b'W',
+    b'X', b'Y', b'Z', b'[', b'\\', b']', b'^', b'_'
+];
+
+// Base64 encoding table (from GNU sharutils base64.c)
+const BASE64_TABLE: [u8; 64] = *b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// ENC macro equivalent - encode 6-bit value using uuencoding table
+#[inline]
+fn enc(value: u8) -> u8 {
+    UU_STD[(value & 0o77) as usize]
+}
+
+/// Encode a block of data using traditional uuencoding
+/// Converts 3 input bytes into 4 encoded characters
+/// Returns the number of output bytes written
+pub fn uuencode_block(input: &[u8], output: &mut [u8]) -> usize {
+    let mut out_pos = 0;
+    let mut in_pos = 0;
+    
+    while in_pos + 3 <= input.len() && out_pos + 4 <= output.len() {
+        let b0 = input[in_pos];
+        let b1 = input[in_pos + 1];
+        let b2 = input[in_pos + 2];
+        
+        output[out_pos] = enc(b0 >> 2);
+        output[out_pos + 1] = enc(((b0 & 0x03) << 4) | ((b1 >> 4) & 0x0F));
+        output[out_pos + 2] = enc(((b1 & 0x0F) << 2) | ((b2 >> 6) & 0x03));
+        output[out_pos + 3] = enc(b2 & 0x3F);
+        
+        in_pos += 3;
+        out_pos += 4;
+    }
+    
+    // Handle remaining bytes (padding)
+    if in_pos < input.len() && out_pos + 4 <= output.len() {
+        let b0 = input[in_pos];
+        let b1 = if in_pos + 1 < input.len() { input[in_pos + 1] } else { 0 };
+        
+        output[out_pos] = enc(b0 >> 2);
+        output[out_pos + 1] = enc(((b0 & 0x03) << 4) | ((b1 >> 4) & 0x0F));
+        output[out_pos + 2] = enc((b1 & 0x0F) << 2);
+        output[out_pos + 3] = enc(0);
+        
+        out_pos += 4;
+    }
+    
+    out_pos
+}
+
+/// Encode data using base64 encoding (RFC 4648 compatible)
+/// Converts 3 input bytes into 4 encoded characters
+/// Returns the number of output bytes written
+pub fn base64_encode_block(input: &[u8], output: &mut [u8]) -> usize {
+    let mut out_pos = 0;
+    let mut in_pos = 0;
+    
+    while in_pos + 3 <= input.len() && out_pos + 4 <= output.len() {
+        let b0 = input[in_pos];
+        let b1 = input[in_pos + 1];
+        let b2 = input[in_pos + 2];
+        
+        output[out_pos] = BASE64_TABLE[(b0 >> 2) as usize];
+        output[out_pos + 1] = BASE64_TABLE[(((b0 & 0x03) << 4) | ((b1 >> 4) & 0x0F)) as usize];
+        output[out_pos + 2] = BASE64_TABLE[(((b1 & 0x0F) << 2) | ((b2 >> 6) & 0x03)) as usize];
+        output[out_pos + 3] = BASE64_TABLE[(b2 & 0x3F) as usize];
+        
+        in_pos += 3;
+        out_pos += 4;
+    }
+    
+    // Handle remaining bytes (with padding)
+    if in_pos < input.len() && out_pos + 4 <= output.len() {
+        let b0 = input[in_pos];
+        let b1 = if in_pos + 1 < input.len() { input[in_pos + 1] } else { 0 };
+        
+        output[out_pos] = BASE64_TABLE[(b0 >> 2) as usize];
+        output[out_pos + 1] = BASE64_TABLE[(((b0 & 0x03) << 4) | ((b1 >> 4) & 0x0F)) as usize];
+        
+        if in_pos + 1 < input.len() {
+            output[out_pos + 2] = BASE64_TABLE[((b1 & 0x0F) << 2) as usize];
+        } else {
+            output[out_pos + 2] = b'=';
+        }
+        output[out_pos + 3] = b'=';
+        
+        out_pos += 4;
+    }
+    
+    out_pos
+}
+
+/// Encode filename using base64 (for --encode-file-name option)
+pub fn base64_encode_filename(filename: &str) -> String {
+    let input_bytes = filename.as_bytes();
+    let output_len = ((input_bytes.len() + 2) / 3) * 4; // BASE64_LENGTH macro equivalent
+    let mut output = vec![0u8; output_len];
+    
+    let written = base64_encode_block(input_bytes, &mut output);
+    output.truncate(written);
+    
+    // Convert to string, replacing padding with no padding for filenames
+    String::from_utf8(output).unwrap_or_else(|_| filename.to_string())
+        .trim_end_matches('=')
+        .to_string()
+}
+
+/// Main encoding function that reads input in 45-byte chunks and outputs encoded lines.
+/// This is the core encoding loop ported from GNU uuencode.c
+pub fn encode<R: std::io::Read, W: std::io::Write>(
+    input: &mut R,
+    output: &mut W,
+    use_base64: bool,
+) -> std::io::Result<()> {
+    let mut finishing = false;
+
+    loop {
+        let mut buf = [0u8; 45];
+        let mut buf_out = [0u8; 64];
+        
+        // Read up to 45 bytes from input
+        let rdct = match input.read(&mut buf) {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(e) => return Err(e),
+        };
+
+        // Check if this is the last chunk
+        if rdct < 45 {
+            finishing = true;
+        }
+
+        let wrct = if !use_base64 {
+            // Traditional uuencoding
+            // First character is the encoded count
+            let count_char = enc(rdct as u8);
+            output.write_all(&[count_char])?;
+            
+            // Encode the data block
+            uuencode_block(&buf[..rdct], &mut buf_out)
+        } else {
+            // Base64 encoding - use our base64_encode_block function
+            base64_encode_block(&buf[..rdct], &mut buf_out)
+        };
+
+        // Write encoded data
+        output.write_all(&buf_out[..wrct])?;
+        
+        // Write newline
+        output.write_all(b"\n")?;
+
+        if finishing {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate the header line for uuencoded output
+/// Format: "begin[-base64][-encoded] mode filename\n"
+pub fn write_uuencode_header<W: std::io::Write>(
+    output: &mut W,
+    mode: u32,
+    filename: &str,
+    use_base64: bool,
+    encode_filename: bool,
+) -> std::io::Result<()> {
+    let mut header = String::from("begin");
+    
+    if use_base64 {
+        header.push_str("-base64");
+    }
+    
+    if encode_filename {
+        header.push_str("-encoded");
+    }
+    
+    let display_filename = if encode_filename {
+        base64_encode_filename(filename)
+    } else {
+        filename.to_string()
+    };
+    
+    writeln!(output, "{} {:o} {}", header, mode, display_filename)?;
+    Ok(())
+}
+
+/// Generate the trailer line for uuencoded output  
+/// Traditional uuencoding: "end\n"
+/// Base64 encoding: "====\n"
+pub fn write_uuencode_trailer<W: std::io::Write>(
+    output: &mut W,
+    use_base64: bool,
+) -> std::io::Result<()> {
+    if use_base64 {
+        writeln!(output, "====")?;
+    } else {
+        // Traditional uuencoding writes a zero-length line first
+        let zero_char = enc(0);
+        writeln!(output, "{}", zero_char as char)?;
+        writeln!(output, "end")?;
+    }
+    Ok(())
+}
 pub fn validate_version_mode(value: &OsStr) -> Result<(), ValidationError> {
     let s = value.to_str()
         .ok_or_else(|| ValidationError::new("Invalid UTF-8 in version mode".to_string()))?;

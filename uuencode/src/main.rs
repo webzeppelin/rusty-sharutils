@@ -3,9 +3,10 @@ use std::process;
 use sharutils_core::{
     OptionDefinition, standard_options, parse_command_line, 
     generate_help, validate_version_mode, validate_file_path,
-    handle_version_output, handle_more_help, debug_print_parsed_command,
-    print_config_file_options
+    handle_version_output, handle_more_help, print_config_file_options
 };
+#[cfg(debug_assertions)]
+use sharutils_core::debug_print_parsed_command;
 
 /// Returns uuencode-specific command line options
 fn uuencode_options() -> Vec<OptionDefinition> {
@@ -82,7 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     
-    // Debug output the parsed command
+    // Debug output the parsed command (only in debug builds)
+    #[cfg(debug_assertions)]
     debug_print_parsed_command(&parsed);
     
     // Handle special options that cause immediate exit
@@ -125,36 +127,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         process::exit(1);
     }
     
-    // At this point we would implement the actual uuencode functionality
-    // For now, just indicate that parsing was successful
-    println!("uuencode: Command line parsing completed successfully!");
-    println!("This is where the actual encoding logic would be implemented.");
-    
-    // Print the configuration for verification
-    if parsed.is_option_set("base64") {
-        println!("Configuration: Using base64 encoding");
-    } else {
-        println!("Configuration: Using traditional uuencoding");
-    }
-    
-    if parsed.is_option_set("encode-file-name") {
-        println!("Configuration: Output filename will be encoded");
-    }
-    
-    match parsed.arguments.len() {
-        1 => {
-            println!("Input: Reading from standard input");
-            println!("Output name: {:?}", parsed.arguments[0]);
-        },
-        2 => {
-            println!("Input file: {:?}", parsed.arguments[0]);
-            println!("Output name: {:?}", parsed.arguments[1]);
-        },
-        _ => unreachable!()
-    }
-    
     // Handle save-opts and load-opts if specified
     print_config_file_options(&parsed);
+
+    // Parse options for encoding behavior  
+    let use_base64 = parsed.is_option_set("base64");
+    let encode_filename = parsed.is_option_set("encode-file-name");
+    
+    // Determine input source and output filename
+    let (input_file, output_name) = match parsed.arguments.len() {
+        1 => {
+            // Read from stdin, output name is first argument
+            (None, &parsed.arguments[0])
+        },
+        2 => {
+            // Read from file, output name is second argument  
+            (Some(&parsed.arguments[0]), &parsed.arguments[1])
+        },
+        _ => unreachable!()
+    };
+    
+    // Get file mode (permissions) - default to 644 for stdin
+    let file_mode = if let Some(input_path) = input_file {
+        // Try to get actual file permissions
+        match std::fs::metadata(input_path) {
+            Ok(metadata) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    metadata.permissions().mode() & 0o777
+                }
+                #[cfg(not(unix))]
+                {
+                    0o644 // Default mode for non-Unix systems
+                }
+            }
+            Err(e) => {
+                eprintln!("Error accessing input file {:?}: {}", input_path, e);
+                process::exit(1);
+            }
+        }
+    } else {
+        0o644 // Default mode for stdin
+    };
+    
+    // Open input source
+    let mut input: Box<dyn std::io::Read> = if let Some(input_path) = input_file {
+        match std::fs::File::open(input_path) {
+            Ok(file) => Box::new(file),
+            Err(e) => {
+                eprintln!("Error opening input file {:?}: {}", input_path, e);
+                process::exit(1);
+            }
+        }
+    } else {
+        Box::new(std::io::stdin())
+    };
+    
+    let mut output = std::io::stdout();
+    
+    // Write header
+    let output_name_str = output_name.to_string_lossy();
+    if let Err(e) = sharutils_core::write_uuencode_header(
+        &mut output, 
+        file_mode, 
+        &output_name_str, 
+        use_base64,
+        encode_filename
+    ) {
+        eprintln!("Error writing header: {}", e);
+        process::exit(1);
+    }
+    
+    // Encode the data
+    if let Err(e) = sharutils_core::encode(&mut input, &mut output, use_base64) {
+        eprintln!("Error during encoding: {}", e);
+        process::exit(1);
+    }
+    
+    // Write trailer
+    if let Err(e) = sharutils_core::write_uuencode_trailer(&mut output, use_base64) {
+        eprintln!("Error writing trailer: {}", e);
+        process::exit(1);
+    }
     
     Ok(())
 }
